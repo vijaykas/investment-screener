@@ -3,7 +3,6 @@
 
 # IDE
 .claude/
-.github/
 .idea/
 
 # App state
