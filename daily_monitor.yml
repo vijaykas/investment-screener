@@ -1,0 +1,76 @@
+# ============================================================
+#  Investment Intelligence — Daily Monitor (GitHub Actions)
+#
+#  Runs twice a day (Pacific Time):
+#    • 8:00 AM PT  →  15:00 UTC  (PDT) / 16:00 UTC (PST)
+#    • 8:00 PM PT  →  03:00 UTC  (PDT) / 04:00 UTC (PST)
+#
+#  Required GitHub Secrets (Settings → Secrets → Actions):
+#    GMAIL_SENDER        Gmail address you send FROM
+#    GMAIL_APP_PASSWORD  16-char App Password (not your login password)
+#    REPORT_EMAIL        Destination address for the report
+#
+#  How to create a Gmail App Password:
+#    1. Enable 2-Step Verification on your Google account
+#    2. Go to myaccount.google.com → Security → App Passwords
+#    3. Create a new app password (name it "Investment Monitor")
+#    4. Copy the 16-char code → paste as GMAIL_APP_PASSWORD secret
+# ============================================================
+
+name: Daily Investment Monitor
+
+on:
+  schedule:
+    # 8:00 AM PDT (UTC-7) = 15:00 UTC
+    - cron: '0 15 * * *'
+    # 8:00 PM PDT (UTC-7) = 03:00 UTC (next calendar day)
+    - cron: '0 3 * * *'
+
+  # Allow manual trigger from the Actions tab
+  workflow_dispatch:
+
+jobs:
+  run-monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    permissions:
+      contents: write   # needed to commit the HTML report back to the repo
+
+    steps:
+      # ── 1. Checkout repo ─────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Set up Python ─────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      # ── 3. Install dependencies ───────────────────────────
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install yfinance ta pandas numpy
+
+      # ── 4. Run the monitor ────────────────────────────────
+      - name: Run daily_monitor.py
+        env:
+          # Credentials come from GitHub Secrets — never hardcoded
+          GMAIL_SENDER:       ${{ secrets.GMAIL_SENDER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          REPORT_EMAIL:       ${{ secrets.REPORT_EMAIL }}
+        run: python3 daily_monitor.py
+
+      # ── 5. Commit the HTML report back to the repo ────────
+      - name: Commit HTML report
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add daily_reports/
+          git add data/signal_history.json || true
+          # Only commit if something changed
+          git diff --staged --quiet || git commit -m "chore: daily report $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git push
