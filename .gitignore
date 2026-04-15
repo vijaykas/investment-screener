@@ -23,6 +23,5 @@ venv/
 
 # Generated outputs (recreated at runtime)
 charts/
-daily_reports/
 data/
 models/
