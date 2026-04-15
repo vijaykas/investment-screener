@@ -53,7 +53,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install yfinance ta pandas numpy
+          pip install -r requirements.txt
 
       # ── 4. Run the monitor ────────────────────────────────
       - name: Run daily_monitor.py
