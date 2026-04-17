@@ -63,11 +63,6 @@ for _d in (DATA_DIR, CHARTS_DIR, MODELS_DIR, REPORTS_DIR, DOCS_DIR):
 # ─────────────────────────────────────────────────────────────
 
 API_KEYS = {
-    # FINNHUB_KEY=d7e7jhpr01qkuebj88ogd7e7jhpr01qkuebj88p0
-    # FRED_KEY=a7776e7caa34b0e4de03e935c6867de2
-    # ALPHA_VANTAGE_KEY=KELWAWB5YY4VRDEW
-    # FMP_KEY=WEvF1WI8UNXwmv6GOKydXTAKimjqgmdC
-
     # ── Finnhub (news, insider transactions, earnings) ─────────
     # Free tier: 60 req/min | Get key → https://finnhub.io
     "finnhub": os.getenv("FINNHUB_KEY", ""),
@@ -921,6 +916,32 @@ ML_CONFIG = {
 
     # Chart: how many top features to display
     "top_features_chart": 25,
+}
+
+
+# ─────────────────────────────────────────────────────────────
+#  SMS ALERTS CONFIG (Phase 6d — Twilio SMS)
+#  Credentials loaded from environment variables / GitHub Secrets.
+#  Override thresholds here — defaults match sms_alerts.py.
+# ─────────────────────────────────────────────────────────────
+
+SMS_CONFIG = {
+    # Price move thresholds (%)
+    "move_up_pct":          6.0,    # surge  > 6%  → SMS alert
+    "move_down_pct":        5.0,    # drop   > 5%  → SMS alert
+
+    # RSI extremes
+    "rsi_overbought_alert": 82,     # RSI > 82 → very overbought
+    "rsi_oversold_alert":   22,     # RSI < 22 → deeply oversold
+
+    # Insider buy size threshold (USD)
+    "insider_buy_threshold": 250_000,  # $250k+ single purchase
+
+    # Macro health score threshold
+    "macro_alert_threshold": 20,    # macro score < 20 = risk-off emergency
+
+    # Hard cap: max SMS per monitor run (free Twilio trial ≈ 15 SMS/month)
+    "max_sms_per_run":       5,
 }
 
 
