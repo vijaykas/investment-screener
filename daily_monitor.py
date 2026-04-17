@@ -42,7 +42,20 @@ from datetime import datetime, date, timedelta
 # ─────────────────────────────────────────────
 #  CONFIGURATION  (loaded from config.py)
 # ─────────────────────────────────────────────
-from config import MONITOR_CONFIG, ETF_MONITOR_CONFIG, ETF_WATCHLIST, DATA_DIR, REPORTS_DIR, get_watchlist, NEWS_SENTIMENT_CONFIG, TOP20_CONFIG, CRYPTO_CONFIG, CRYPTO_WATCHLIST
+from config import MONITOR_CONFIG, ETF_MONITOR_CONFIG, ETF_WATCHLIST, DATA_DIR, REPORTS_DIR, get_watchlist, NEWS_SENTIMENT_CONFIG, TOP20_CONFIG, CRYPTO_CONFIG, CRYPTO_WATCHLIST, API_KEYS
+
+# ── Phase 5 enhancements ──────────────────────
+from earnings_monitor import fetch_earnings_calendar
+from insider_monitor  import fetch_insider_activity
+from fundamentals     import fetch_fundamentals
+from macro_dashboard  import fetch_macro_dashboard
+
+# ── Phase 6 enhancements ──────────────────────
+from options_monitor  import fetch_options_data, get_options_events
+from auto_sentiment   import fetch_auto_sentiment
+from sector_rotation  import fetch_sector_rotation
+from sms_alerts       import send_sms_alerts
+from ml_enhancer      import compute_enhanced_scores
 
 OUTPUT_DIR   = DATA_DIR   # data files (signal_history.json) written to data/
 HISTORY_FILE = os.path.join(DATA_DIR, MONITOR_CONFIG["history_file"])
@@ -1308,6 +1321,16 @@ def generate_html_report(
         macro_themes: list = None,
         crypto_scores: dict = None,
         crypto_cycle: dict = None,
+        # ── Phase 5 additions ─────────────────
+        earnings_data: list = None,
+        insider_data: dict = None,
+        fundamental_data: dict = None,
+        macro_data: dict = None,
+        # ── Phase 6 additions ─────────────────
+        options_data: dict = None,
+        sentiment_data: dict = None,
+        sector_rotation: dict = None,
+        enhanced_scores: dict = None,
 ) -> str:
     """Build a self-contained HTML daily report."""
 
@@ -1323,12 +1346,419 @@ def generate_html_report(
         crypto_scores = {}
     if crypto_cycle is None:
         crypto_cycle = {}
+    if earnings_data is None:
+        earnings_data = []
+    if insider_data is None:
+        insider_data = {}
+    if fundamental_data is None:
+        fundamental_data = {}
+    if macro_data is None:
+        macro_data = {}
+    if options_data is None:
+        options_data = {}
+    if sentiment_data is None:
+        sentiment_data = {}
+    if sector_rotation is None:
+        sector_rotation = {}
+    if enhanced_scores is None:
+        enhanced_scores = {}
 
     def sig_color(sig):
         for k, v in SIGNAL_COLOR.items():
             if k in sig:
                 return v
         return "#ffffff"
+
+    # ── Phase 5a: Earnings Calendar HTML ─────────────────────────
+    def _earnings_html(data: list) -> str:
+        if not data:
+            return ""
+        rows_html = ""
+        for e in data:
+            d         = e["days_until"]
+            urgency   = "#EF5350" if d == 0 else "#FF9800" if d <= 3 else "#e6edf3"
+            eps_str   = f"${e['eps_estimate']:.2f}" if e.get("eps_estimate") is not None else "—"
+            rows_html += (
+                f'<tr>'
+                f'<td><a href="https://finance.yahoo.com/quote/{e["ticker"]}" target="_blank" '
+                f'style="color:#58a6ff;font-weight:bold">{e["ticker"]}</a></td>'
+                f'<td style="color:{urgency};font-weight:bold">{e["note"]}</td>'
+                f'<td>{e["date"]}</td>'
+                f'<td>{eps_str}</td>'
+                f'</tr>'
+            )
+        return f"""
+<div class="section">
+  <h2>📅 Upcoming Earnings (next 14 days)</h2>
+  <p style="color:#8b949e;font-size:12px;margin-bottom:10px">
+    Earnings are the #1 price catalyst — position before the report, not after.
+  </p>
+  <table>
+    <tr><th>Ticker</th><th>When</th><th>Date</th><th>EPS Est.</th></tr>
+    {rows_html}
+  </table>
+</div>"""
+
+    # ── Phase 5b: Insider Activity HTML ──────────────────────────
+    def _insider_html(data: dict) -> str:
+        rows = data.get("_rows", [])
+        if not rows:
+            return ""
+        # Show top buys prominently then sells
+        buys  = [r for r in rows if r["type"] == "BUY"][:8]
+        sells = [r for r in rows if r["type"] == "SELL"][:4]
+
+        def insider_row(r):
+            color  = "#00E676" if r["type"] == "BUY" else "#EF5350"
+            label  = "🟢 BUY"  if r["type"] == "BUY" else "🔴 SELL"
+            val    = f"${r['value']:,.0f}" if r["value"] else "—"
+            shares = f"{r['shares']:,}"    if r["shares"] else "—"
+            return (
+                f'<tr>'
+                f'<td><a href="https://finance.yahoo.com/quote/{r["ticker"]}" target="_blank" '
+                f'style="color:#58a6ff;font-weight:bold">{r["ticker"]}</a></td>'
+                f'<td style="color:{color};font-weight:bold">{label}</td>'
+                f'<td style="color:#8b949e">{r["name"]}</td>'
+                f'<td>{shares}</td>'
+                f'<td style="color:{color}">{val}</td>'
+                f'<td>{r["date"]}</td>'
+                f'</tr>'
+            )
+
+        all_rows_html = "".join(insider_row(r) for r in buys + sells)
+        return f"""
+<div class="section">
+  <h2>🏛️ Insider Transactions (last 30 days)</h2>
+  <p style="color:#8b949e;font-size:12px;margin-bottom:10px">
+    Insiders buy with personal money — significant purchases are a strong bullish signal.
+  </p>
+  <table>
+    <tr><th>Ticker</th><th>Type</th><th>Insider</th><th>Shares</th><th>Value</th><th>Date</th></tr>
+    {all_rows_html}
+  </table>
+</div>"""
+
+    # ── Phase 5d: Fundamental Snapshot HTML ──────────────────────
+    def _fundamental_html(fund: dict, scores: dict) -> str:
+        if not fund:
+            return ""
+        # Sort by fundamental score desc, show top 15
+        tickers_sorted = sorted(
+            [t for t in scores if t in fund],
+            key=lambda t: fund[t].get("fundamental_score", 0),
+            reverse=True
+        )[:15]
+
+        rows_html = ""
+        for t in tickers_sorted:
+            f   = fund[t]
+            fs  = f.get("fundamental_score", 0)
+            bar = "█" * (fs // 3) + "░" * (8 - fs // 3)
+            fwd_pe   = f"{f['fwd_pe']:.1f}x" if f.get("fwd_pe") else "—"
+            margin   = f"{f['net_margin_pct']:.1f}%" if f.get("net_margin_pct") is not None else "—"
+            roe      = f"{f['roe_pct']:.1f}%" if f.get("roe_pct") is not None else "—"
+            rev_g    = f"{f['rev_growth_pct']:+.1f}%" if f.get("rev_growth_pct") is not None else "—"
+            short_s  = f.get("short_signal", "—")
+            analyst  = f.get("analyst_rec", "").replace("_", " ").title() or "—"
+            score_color = "#00E676" if fs >= 18 else "#40C4FF" if fs >= 12 else "#FF9800" if fs >= 7 else "#EF5350"
+            rows_html += (
+                f'<tr>'
+                f'<td><a href="https://finance.yahoo.com/quote/{t}" target="_blank" '
+                f'style="color:#58a6ff;font-weight:bold">{t}</a></td>'
+                f'<td style="color:{score_color};font-weight:bold">{fs}/25</td>'
+                f'<td style="font-family:monospace;font-size:11px;color:{score_color}">{bar}</td>'
+                f'<td>{fwd_pe}</td>'
+                f'<td>{margin}</td>'
+                f'<td>{roe}</td>'
+                f'<td style="color:{"#00E676" if f.get("rev_growth_pct",0)>0 else "#EF5350"}">{rev_g}</td>'
+                f'<td style="font-size:12px">{short_s}</td>'
+                f'<td style="color:#8b949e;font-size:12px">{analyst}</td>'
+                f'</tr>'
+            )
+        return f"""
+<div class="section">
+  <h2>📊 Fundamental Snapshot</h2>
+  <p style="color:#8b949e;font-size:12px;margin-bottom:10px">
+    Fundamental Score (0–25 pts): Valuation(8) + Profitability(8) + Growth(5) + Balance Sheet(4).
+    Combined with technical score gives a fuller picture for 3–12 month horizons.
+  </p>
+  <table>
+    <tr><th>Ticker</th><th>Fund Score</th><th>Quality Bar</th>
+        <th>Fwd P/E</th><th>Net Margin</th><th>ROE</th>
+        <th>Rev Growth</th><th>Short Interest</th><th>Analyst</th></tr>
+    {rows_html}
+  </table>
+</div>"""
+
+    # ── Phase 6a: Options P/C HTML ───────────────────────────────
+    def _options_html(opt: dict) -> str:
+        if not opt:
+            return ""
+        rows = sorted(opt.items(), key=lambda x: (x[1].get("vol_pc") or 99))
+        rows_html = ""
+        for ticker, d in rows[:20]:
+            vol_pc = d.get("vol_pc")
+            oi_pc  = d.get("oi_pc")
+            squeeze = d.get("squeeze_setup", False)
+            sq_badge = ' <span style="background:#3a1a00;color:#FF9800;padding:1px 6px;border-radius:8px;font-size:10px">⚡ SQUEEZE WATCH</span>' if squeeze else ""
+            def pc_color(r):
+                if r is None: return "#8b949e"
+                if r > 1.5:   return "#EF5350"
+                if r > 1.0:   return "#FF9800"
+                if r > 0.7:   return "#8b949e"
+                if r > 0.5:   return "#40C4FF"
+                return "#00E676"
+            vc = pc_color(vol_pc)
+            oc = pc_color(oi_pc)
+            vp_str = f"{vol_pc:.2f}" if vol_pc is not None else "—"
+            op_str = f"{oi_pc:.2f}"  if oi_pc  is not None else "—"
+            rows_html += (
+                f'<tr>'
+                f'<td><a href="https://finance.yahoo.com/quote/{ticker}" target="_blank" '
+                f'style="color:#58a6ff;font-weight:bold">{ticker}</a>{sq_badge}</td>'
+                f'<td style="color:{vc};font-weight:bold">{vp_str}</td>'
+                f'<td style="color:{oc}">{op_str}</td>'
+                f'<td style="color:#8b949e;font-size:11px">{d.get("vol_pc_signal","—")}</td>'
+                f'</tr>'
+            )
+        return f"""
+<div class="section">
+  <h2>📊 Options Put/Call Ratios
+    <span style="font-size:11px;color:#8b949e;font-weight:400;margin-left:10px">
+      Near-term options flow (7–45 day expirations) · Low P/C = bullish, High P/C = bearish hedge
+    </span>
+  </h2>
+  <table>
+    <tr><th>Ticker</th><th>Vol P/C Ratio</th><th>OI P/C Ratio</th><th>Signal</th></tr>
+    {rows_html}
+  </table>
+  <p style="color:#484f58;font-size:11px;margin-top:10px">
+    P/C &lt; 0.5 = strong call bias · 0.5–1.0 = neutral · &gt; 1.5 = heavy put buying (bearish hedge).
+    ⚡ Squeeze Watch = high short interest + low P/C = potential short squeeze candidate.
+  </p>
+</div>"""
+
+    # ── Phase 6b: Auto Sentiment HTML ────────────────────────────
+    def _sentiment_html(sent: dict) -> str:
+        if not sent:
+            return ""
+        # Sort by score descending (most bullish first)
+        rows = sorted(sent.items(), key=lambda x: -x[1].get("score", 0))
+        rows_html = ""
+        for ticker, d in rows[:20]:
+            score   = d.get("score", 0)
+            label   = d.get("label", "⚪ Neutral")
+            headline = d.get("headline", "")[:80]
+            source  = d.get("source", "")
+            age     = d.get("age_days", 0)
+            # Color bar
+            if   score >= 0.20: bar_bg, bar_fg = "#0d3321", "#69f0ae"
+            elif score >= 0.05: bar_bg, bar_fg = "#1e3320", "#a5d6a7"
+            elif score >= -0.05:bar_bg, bar_fg = "#1e2430", "#8b949e"
+            elif score >= -0.20:bar_bg, bar_fg = "#2a1a0a", "#ef9a9a"
+            else:               bar_bg, bar_fg = "#3a0d0d", "#ff8a80"
+            age_str = f"today" if age == 0 else f"{age}d ago"
+            rows_html += (
+                f'<tr style="background:{bar_bg}">'
+                f'<td><a href="https://finance.yahoo.com/quote/{ticker}" target="_blank" '
+                f'style="color:#58a6ff;font-weight:bold">{ticker}</a></td>'
+                f'<td style="color:{bar_fg};font-weight:bold">{score:+.3f}</td>'
+                f'<td style="color:{bar_fg};font-size:12px">{label}</td>'
+                f'<td style="color:#8b949e;font-size:11px;max-width:300px">{headline}</td>'
+                f'<td style="color:#484f58;font-size:11px">{source} · {age_str}</td>'
+                f'</tr>'
+            )
+        return f"""
+<div class="section">
+  <h2>📰 Auto News Sentiment
+    <span style="font-size:11px;color:#8b949e;font-weight:400;margin-left:10px">
+      {len(sent)} tickers · Pre-scored via Finnhub/Alpha Vantage · Refreshed every 6h
+    </span>
+  </h2>
+  <table>
+    <tr><th>Ticker</th><th>Score</th><th>Sentiment</th><th>Top Headline</th><th>Source</th></tr>
+    {rows_html}
+  </table>
+</div>"""
+
+    # ── Phase 6c: Sector Rotation HTML ───────────────────────────
+    def _sector_rotation_html(rot: dict) -> str:
+        if not rot:
+            return ""
+        ranked   = rot.get("ranked", [])
+        sectors  = rot.get("sectors", {})
+        cycle    = rot.get("cycle_phase", "—")
+        rotate_in  = rot.get("rotate_in", [])
+        rotate_out = rot.get("rotate_out", [])
+
+        def sig_bg(sig: str):
+            if "ROTATE IN"  in sig: return "#0d3321", "#69f0ae"
+            if "HOLD"       in sig: return "#0d2a3a", "#40C4FF"
+            if "NEUTRAL"    in sig: return "#1e2430", "#8b949e"
+            if "ROTATE OUT" in sig: return "#2a1a0a", "#FF9800"
+            return "#3a0d0d", "#EF5350"
+
+        rows_html = ""
+        for etf, score in ranked:
+            d   = sectors.get(etf, {})
+            sig = d.get("signal", "—")
+            bg, fg = sig_bg(sig)
+            rel1 = d.get("rel_1m")
+            rel3 = d.get("rel_3m")
+            rel6 = d.get("rel_6m")
+            def rel_str(v):
+                if v is None: return "—"
+                c = "#69f0ae" if v >= 0 else "#ef9a9a"
+                return f'<span style="color:{c}">{v:+.1f}%</span>'
+            rsi  = d.get("rsi", "—")
+            adx  = d.get("adx", "—")
+            name = d.get("name", etf)
+            rows_html += (
+                f'<tr style="background:{bg}">'
+                f'<td style="font-weight:bold;color:#58a6ff">{etf}</td>'
+                f'<td style="color:#8b949e;font-size:11px">{name}</td>'
+                f'<td style="font-weight:bold">{score}/100</td>'
+                f'<td style="color:{fg};font-size:11px;font-weight:bold">{sig}</td>'
+                f'<td>{rel_str(rel1)}</td>'
+                f'<td>{rel_str(rel3)}</td>'
+                f'<td>{rel_str(rel6)}</td>'
+                f'<td style="color:#8b949e">{rsi}</td>'
+                f'<td style="color:#8b949e">{adx}</td>'
+                f'</tr>'
+            )
+
+        ri_html = ", ".join(f'<span style="background:#0d3321;color:#69f0ae;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:bold">{t}</span>' for t in rotate_in) or "None"
+        ro_html = ", ".join(f'<span style="background:#3a0d0d;color:#EF5350;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:bold">{t}</span>' for t in rotate_out) or "None"
+
+        return f"""
+<div class="section">
+  <h2>🔄 Sector Rotation Model
+    <span style="font-size:11px;color:#8b949e;font-weight:400;margin-left:10px">
+      GICS 11-sector momentum + technicals + OBV flow vs SPY benchmark
+    </span>
+  </h2>
+  <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:14px">
+    <div class="kpi">
+      <div class="kpi-val" style="font-size:14px;color:#58a6ff">{cycle}</div>
+      <div class="kpi-label">Inferred Cycle Phase</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label" style="margin-bottom:6px">Rotate INTO →</div>
+      <div>{ri_html}</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label" style="margin-bottom:6px">Rotate OUT of →</div>
+      <div>{ro_html}</div>
+    </div>
+  </div>
+  <table>
+    <tr><th>ETF</th><th>Sector</th><th>Score</th><th>Signal</th>
+        <th>1M vs SPY</th><th>3M vs SPY</th><th>6M vs SPY</th><th>RSI</th><th>ADX</th></tr>
+    {rows_html}
+  </table>
+  <p style="color:#484f58;font-size:11px;margin-top:10px">
+    Score = Momentum vs SPY (40pts: 1M/3M/6M) + Technical (35pts: RSI/200MA/MACD/ADX) + OBV Flow (25pts).
+    Cycle phases: Early Recovery → Financials/Disc/Industrials | Mid Expansion → Tech/Materials/Energy |
+    Late Cycle → Energy/Healthcare/Staples | Contraction → Utilities/Staples/Healthcare.
+  </p>
+</div>"""
+
+    # ── Phase 6e: Enhanced Score HTML ────────────────────────────
+    def _enhanced_scores_html(enh: dict, today_sc: dict) -> str:
+        if not enh:
+            return ""
+        # Show top 15 by enhanced score
+        rows = sorted(enh.items(), key=lambda x: -x[1]["enhanced_score"])[:15]
+        rows_html = ""
+        for ticker, d in rows:
+            base   = d["base_score"]
+            enh_sc = d["enhanced_score"]
+            adj    = d["total_adj"]
+            signal = d["enhanced_signal"]
+            factors = " · ".join(d["factors"][:3]) if d["factors"] else "—"
+            adj_color = "#69f0ae" if adj > 0 else ("#EF5350" if adj < 0 else "#8b949e")
+            sig_color_map = {
+                "CONVICTION": "#00E676",
+                "STRONG BUY": "#00E676",
+                "BUY":        "#40C4FF",
+                "HOLD":       "#FFD740",
+                "CAUTION":    "#FF6D00",
+                "AVOID":      "#EF5350",
+            }
+            sc = "#ffffff"
+            for k, v in sig_color_map.items():
+                if k in signal:
+                    sc = v
+                    break
+            rows_html += (
+                f'<tr>'
+                f'<td><a href="https://finance.yahoo.com/quote/{ticker}" target="_blank" '
+                f'style="color:#58a6ff;font-weight:bold">{ticker}</a></td>'
+                f'<td style="color:#8b949e">{base}/75</td>'
+                f'<td style="color:{adj_color};font-weight:bold">{adj:+.1f}</td>'
+                f'<td style="font-weight:bold;font-size:15px">{enh_sc}/100</td>'
+                f'<td style="color:{sc};font-size:11px;font-weight:bold">{signal}</td>'
+                f'<td style="color:#484f58;font-size:11px">{factors}</td>'
+                f'</tr>'
+            )
+        return f"""
+<div class="section">
+  <h2>🧠 Enhanced Multi-Signal Score
+    <span style="font-size:11px;color:#8b949e;font-weight:400;margin-left:10px">
+      Technical + Fundamental + Insider + Options + Sentiment + Sector Rotation · Top 15
+    </span>
+  </h2>
+  <table>
+    <tr><th>Ticker</th><th>Tech Score</th><th>Adjustment</th><th>Enhanced Score</th><th>Signal</th><th>Key Factors</th></tr>
+    {rows_html}
+  </table>
+  <p style="color:#484f58;font-size:11px;margin-top:10px">
+    Base technical score (0–75) adjusted by: Fundamentals (±10) + Insider (±5) + Options P/C (±5) + Sentiment (±4) + Sector Rotation (±5).
+    Enhanced score capped at 100. ≥85 = Conviction Buy · ≥72 = Strong Buy · ≥58 = Buy.
+  </p>
+</div>"""
+
+    # ── Phase 5e: Macro Dashboard HTML ───────────────────────────
+    def _macro_html(md: dict) -> str:
+        if not md:
+            return ""
+        score      = md.get("macro_score", 0)
+        signal     = md.get("macro_signal", "—")
+        source     = md.get("source", "")
+        score_color = "#00E676" if score >= 70 else "#40C4FF" if score >= 50 else "#FF9800" if score >= 35 else "#EF5350"
+
+        def row(label, value, note=""):
+            return (f'<tr><td style="color:#8b949e;font-weight:600">{label}</td>'
+                    f'<td style="color:#e6edf3">{value}</td>'
+                    f'<td style="color:#8b949e;font-size:12px">{note}</td></tr>')
+
+        yc_row  = row("Yield Curve (10Y-2Y)", md.get("yield_curve_label","—"), "Negative = recession signal")
+        vix_row = row("VIX Fear Index",       md.get("vix_label","—"),         ">30 = fear/panic")
+        cpi_row = row("Inflation (CPI YoY)",  md.get("cpi_label","—"),         "Fed target: ~2%")
+        ue_row  = row("Unemployment",         md.get("ue_label","—"),           "Full employment ~4%")
+        ff_row  = row("Fed Funds Rate",
+                      f"{md['fed_funds']:.2f}%" if md.get("fed_funds") else "—",
+                      "Higher = headwind for equities")
+        dxy_row = row("US Dollar (DXY)",
+                      f"{md['dxy']:.2f}" if md.get("dxy") else "—",
+                      f"1-month change: {md['dxy_1m_chg']:+.1f}%" if md.get("dxy_1m_chg") is not None else "")
+
+        return f"""
+<div class="section">
+  <h2>🌐 Macro Dashboard</h2>
+  <div style="display:flex;gap:20px;align-items:center;margin-bottom:16px;flex-wrap:wrap">
+    <div class="kpi">
+      <div class="kpi-val" style="color:{score_color}">{score}/100</div>
+      <div class="kpi-label">Macro Health Score</div>
+    </div>
+    <div style="color:{score_color};font-size:15px;font-weight:700">{signal}</div>
+    <div style="color:#484f58;font-size:11px">Source: {source}</div>
+  </div>
+  <table>
+    <tr><th style="text-align:left">Indicator</th><th style="text-align:left">Value</th><th style="text-align:left">Context</th></tr>
+    {yc_row}{vix_row}{cpi_row}{ue_row}{ff_row}{dxy_row}
+  </table>
+</div>"""
 
     # Top picks today (non-ETF, by score)
     top_picks = sorted(
@@ -1426,10 +1856,12 @@ def generate_html_report(
     events_rows = ""
     for e in events[:20]:
         icon = event_icons.get(e["type"], "📌")
+        price_val = e.get("price")
+        price_str = f"${price_val}" if price_val is not None else "—"
         events_rows += f"""
         <tr>
             <td>{ticker_link(e['ticker'])}</td>
-            <td>${e['price']}</td>
+            <td>{price_str}</td>
             <td>{icon} <strong>{e['type']}</strong></td>
             <td style="color:#ccc">{e['detail']}</td>
         </tr>"""
@@ -1580,6 +2012,18 @@ def generate_html_report(
                     f'📈 ETFs: {len(etf_scores)}</span>'
                     if etf_scores else "")
 
+    # ── Build Phase 5 HTML blocks ────────────────────────────────
+    earnings_html_block    = _earnings_html(earnings_data)
+    insider_html_block     = _insider_html(insider_data)
+    fundamental_html_block = _fundamental_html(fundamental_data, today_scores)
+    macro_html_block       = _macro_html(macro_data)
+
+    # ── Build Phase 6 HTML blocks ────────────────────────────────
+    options_html_block          = _options_html(options_data)
+    sentiment_html_block        = _sentiment_html(sentiment_data)
+    sector_rotation_html_block  = _sector_rotation_html(sector_rotation)
+    enhanced_scores_html_block  = _enhanced_scores_html(enhanced_scores, today_scores)
+
     now_str = datetime.now().strftime("%A, %B %d, %Y — %H:%M")
 
     html = f"""<!DOCTYPE html>
@@ -1635,6 +2079,8 @@ def generate_html_report(
   </div>
 </div>
 
+{macro_html_block}
+
 {"" if not changes else f'''
 <div class="section">
   <h2>🔔 Signal Changes Since Yesterday</h2>
@@ -1643,6 +2089,8 @@ def generate_html_report(
     {change_rows}
   </table>
 </div>'''}
+
+{earnings_html_block}
 
 <div class="section">
   <h2>🏆 Top 10 Stocks Today</h2>
@@ -1656,6 +2104,18 @@ def generate_html_report(
 </div>
 
 {pnl_html}
+
+{fundamental_html_block}
+
+{insider_html_block}
+
+{options_html_block}
+
+{sentiment_html_block}
+
+{sector_rotation_html_block}
+
+{enhanced_scores_html_block}
 
 {ml_section_html}
 
@@ -1790,11 +2250,93 @@ def run_monitor():
     else:
         print(f"  ℹ️  No crypto data found — run Phase 4c (--crypto) to generate.")
 
+    # ── Phase 5: Enhanced real-time data ─────
+    print(f"\n  {'─'*58}")
+    print(f"  Phase 5 — Real-Time Intelligence Layer")
+    print(f"  {'─'*58}")
+
+    # Flat list of stock tickers (no ETFs) for targeted lookups
+    stock_tickers = [t for t, sec in sector_map.items() if "ETF" not in sec]
+
+    # 5a — Earnings calendar
+    earnings_data = fetch_earnings_calendar(stock_tickers, DATA_DIR, days_ahead=14)
+    if earnings_data:
+        print(f"  📅 Earnings: {len(earnings_data)} stocks reporting in next 14 days.")
+    else:
+        print(f"  📅 Earnings: no upcoming earnings in next 14 days.")
+
+    # 5b — Insider trading
+    finnhub_key  = API_KEYS.get("finnhub", "")
+    insider_data = fetch_insider_activity(stock_tickers, DATA_DIR, finnhub_key=finnhub_key)
+
+    # 5c+5d — Fundamentals + short interest
+    fundamental_data = fetch_fundamentals(stock_tickers, DATA_DIR)
+
+    # 5e — Macro dashboard
+    fred_key   = API_KEYS.get("fred", "")
+    macro_data = fetch_macro_dashboard(DATA_DIR, fred_key=fred_key)
+
+    # ── Phase 6: Advanced Intelligence Layer ─────────────────────
+    print(f"\n  {'─'*58}")
+    print(f"  Phase 6 — Advanced Intelligence Layer")
+    print(f"  {'─'*58}")
+
+    # 6a — Options put/call ratios
+    options_data = fetch_options_data(stock_tickers, DATA_DIR)
+    options_events = get_options_events(options_data, fundamental_data)
+    events.extend(options_events)   # merge squeeze setups into main events feed
+
+    # 6b — Auto news sentiment (Finnhub → Alpha Vantage → CSV)
+    av_key = API_KEYS.get("alpha_vantage", "")
+    sentiment_data = fetch_auto_sentiment(
+        stock_tickers, DATA_DIR,
+        finnhub_key=finnhub_key,
+        av_key=av_key,
+    )
+
+    # 6c — Sector rotation model
+    sector_rotation = fetch_sector_rotation(DATA_DIR)
+
+    # 6e — Enhanced multi-signal scores (ML ensemble layer)
+    enhanced_scores = compute_enhanced_scores(
+        today_scores,
+        sector_map,
+        fundamental_data=fundamental_data,
+        insider_data=insider_data,
+        options_data=options_data,
+        sentiment_data=sentiment_data,
+        sector_rotation=sector_rotation,
+    )
+    if enhanced_scores:
+        top_enhanced = sorted(enhanced_scores.items(), key=lambda x: -x[1]["enhanced_score"])
+        print(f"  🧠 Enhanced scores: top pick = {top_enhanced[0][0]} ({top_enhanced[0][1]['enhanced_score']}/100)")
+
+    # 6d — SMS alerts for critical events
+    sms_sent = send_sms_alerts(
+        today_scores=today_scores,
+        events=events,
+        earnings_data=earnings_data,
+        insider_data=insider_data,
+        options_data=options_data,
+        macro_data=macro_data,
+        fundamental_data=fundamental_data,
+    )
+    if sms_sent:
+        print(f"  📱 {len(sms_sent)} SMS alert(s) sent.")
+
     # ── Generate HTML report ──────────────────
     html = generate_html_report(
         today_scores, changes, pnl_rows, events, sector_map,
         ml_preds, etf_scores, top20_rows, macro_themes,
-        crypto_scores, crypto_cycle
+        crypto_scores, crypto_cycle,
+        earnings_data=earnings_data,
+        insider_data=insider_data,
+        fundamental_data=fundamental_data,
+        macro_data=macro_data,
+        options_data=options_data,
+        sentiment_data=sentiment_data,
+        sector_rotation=sector_rotation,
+        enhanced_scores=enhanced_scores,
     )
     report_path = os.path.join(REPORTS_DIR, f"{TODAY}-{RUN_SLOT}.html")
     with open(report_path, "w") as f:

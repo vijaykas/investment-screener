@@ -10,6 +10,20 @@
 #    GMAIL_APP_PASSWORD  16-char App Password (not your login password)
 #    REPORT_EMAIL        Destination address for the report
 #
+#  Optional Secrets (enable Phase 5/6 enhanced data):
+#    FINNHUB_KEY         Free key → https://finnhub.io
+#                        Enables insider trading data + auto news sentiment
+#    FRED_KEY            Free key → https://fred.stlouisfed.org/docs/api/api_key.html
+#                        Enables FRED macro indicators (yield curve, CPI, unemployment)
+#    ALPHA_VANTAGE_KEY   Free key → https://www.alphavantage.co/support/#api-key
+#                        Enables fallback news sentiment (25 req/day)
+#
+#  Optional Secrets (enable Phase 6d SMS Alerts via Twilio):
+#    TWILIO_ACCOUNT_SID  Your Twilio Account SID (from twilio.com console)
+#    TWILIO_AUTH_TOKEN   Your Twilio Auth Token
+#    TWILIO_FROM_NUMBER  Your Twilio phone number (+1XXXXXXXXXX)
+#    SMS_TO_NUMBER       Your mobile number to receive alerts (+1XXXXXXXXXX)
+#
 #  How to create a Gmail App Password:
 #    1. Enable 2-Step Verification on your Google account
 #    2. Go to myaccount.google.com → Security → App Passwords
@@ -32,7 +46,7 @@ on:
 jobs:
   run-monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25   # Phase 5 adds fundamentals + insider fetch (~10 extra mins)
 
     permissions:
       contents: write   # needed to commit the HTML report back to the repo
@@ -58,10 +72,20 @@ jobs:
       # ── 4. Run the monitor ────────────────────────────────
       - name: Run daily_monitor.py
         env:
-          # Credentials come from GitHub Secrets — never hardcoded
-          GMAIL_SENDER:       ${{ secrets.GMAIL_SENDER }}
-          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
-          REPORT_EMAIL:       ${{ secrets.REPORT_EMAIL }}
+          # Email delivery — required
+          GMAIL_SENDER:         ${{ secrets.GMAIL_SENDER }}
+          GMAIL_APP_PASSWORD:   ${{ secrets.GMAIL_APP_PASSWORD }}
+          REPORT_EMAIL:         ${{ secrets.REPORT_EMAIL }}
+          # Phase 5 enhanced data — optional, gracefully skipped if not set
+          FINNHUB_KEY:          ${{ secrets.FINNHUB_KEY }}
+          FRED_KEY:             ${{ secrets.FRED_KEY }}
+          # Phase 6 advanced intelligence — optional
+          ALPHA_VANTAGE_KEY:    ${{ secrets.ALPHA_VANTAGE_KEY }}
+          # Phase 6d SMS alerts via Twilio — optional
+          TWILIO_ACCOUNT_SID:   ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN:    ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_FROM_NUMBER:   ${{ secrets.TWILIO_FROM_NUMBER }}
+          SMS_TO_NUMBER:        ${{ secrets.SMS_TO_NUMBER }}
         run: python3 daily_monitor.py
 
       # ── 5. Commit the HTML report back to the repo ────────
@@ -70,7 +94,11 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add daily_reports/
-          git add data/signal_history.json || true
+          git add data/signal_history.json data/earnings_cache.json \
+                  data/insider_cache.json data/fundamentals_cache.json \
+                  data/macro_cache.json \
+                  data/options_cache.json data/auto_sentiment_cache.json \
+                  data/sector_rotation_cache.json || true
           # Only commit if something changed
           git diff --staged --quiet || git commit -m "chore: daily report $(date -u +'%Y-%m-%d %H:%M UTC')"
           git push
